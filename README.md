@@ -1,26 +1,87 @@
-# Fake UART over SPI – Arduino UNO Q
+# MicroPython REPL over SPI – Arduino UNO Q
+
+Run a MicroPython REPL on the UNO Q microcontroller (STM32U585) next to your Arduino
+sketch, and reach it from Linux (QRB2210) as a regular serial port.
 
 ```
- screen /tmp/ttyUNOQ0 ── socat PTY ── spi_uart_bridge.py ──SPI (/dev/spidev0.0)──> STM32U585 SPI3 (sketch or MicroPython)
+ screen /tmp/ttyUNOQ0 ── socat PTY ── spi_uart_bridge.py ──SPI (/dev/spidev0.0)──> STM32U585 SPI3 (MicroPython)
                                               ^                                              |
                                               └──────────── GPIO70 (MCU PG13 "SPI RDY") ─────┘
 ```
 
-- `linux/` – runs on the QRB2210 (Debian). socat creates the pty, the bridge forwards
-  writes to SPI and, on a GPIO70 rising edge, clocks a frame to fetch the MCU data.
-- MCU side, one of:
-  - `sketch/` – Zephyr-based Arduino sketch. Reverses each received line and sends
-    it back (`hello\n` → `olleh\r\n`).
-  - MicroPython (Zephyr port) with its REPL running over the same link.
-- `patches/zephyr/` – Zephyr SPI driver fix needed by MicroPython to run SPI3 as
-  peripheral at 1 MHz.
+- **MCU**: the Arduino Zephyr core loader, built with MicroPython in its own thread.
+  MicroPython starts as soon as Linux is up (right after the boot animation) and its
+  REPL runs over SPI3, as SPI peripheral of the QRB2210.
+- **Linux** (`linux/` in this repo): `socat` exposes a pty, `spi_uart_bridge.py`
+  forwards what you type to `/dev/spidev0.0` and, whenever the MCU raises GPIO70,
+  clocks a frame to fetch its output.
 
 Frame format (256 bytes, full duplex): `A5 TYPE LEN_LO LEN_HI payload...`
 (`TYPE` 0x00 = poll, 0x01 = data).
 
-## Linux
+The history of this repository shows how the setup was developed (a plain sketch
+first, then standalone MicroPython, then the loader integration).
 
-One-time setup on the board (Debian trixie):
+## 1. Build the core with MicroPython (host PC)
+
+The pieces live in these branches:
+
+| Repository | Branch | Content |
+|---|---|---|
+| [facchinm/ArduinoCore-zephyr](https://github.com/facchinm/ArduinoCore-zephyr) | `loader_micropython` | west project, loader thread, `build.sh --micropython` |
+| [facchinm/micropython](https://github.com/facchinm/micropython) | `unoq_spi_shell` | SPI stdio driver, embedding support (fetched by west) |
+| [arduino/zephyr](https://github.com/arduino/zephyr) | `zephyr-arduino-v4.4.99` | STM32 SPI peripheral fix (fetched by west) |
+
+Set up the workspace. `bootstrap.sh` creates `venv/` with west, runs `west init` /
+`west update` and installs the Zephyr SDK:
+
+```sh
+mkdir zephyr-ws && cd zephyr-ws
+git clone -b loader_micropython https://github.com/facchinm/ArduinoCore-zephyr
+cd ArduinoCore-zephyr
+./extra/bootstrap.sh
+```
+
+MicroPython is an optional west project, fetch it once:
+
+```sh
+source venv/bin/activate
+west config manifest.group-filter +micropython
+west update micropython
+```
+
+Build the loader:
+
+```sh
+./extra/build.sh unoq --micropython
+```
+
+The result is `firmwares/zephyr-arduino_uno_q_stm32u585xx.elf`.
+
+## 2. Flash the loader
+
+The board's openocd drives the MCU SWD lines through GPIOs. From the PC, with the
+board connected over USB (or use `scp` / `ssh` instead of adb):
+
+```sh
+adb push firmwares/zephyr-arduino_uno_q_stm32u585xx.elf /tmp/loader.elf
+adb shell 'cd /opt/openocd && ./bin/openocd -s . -s share/openocd/scripts -f openocd_gpiod.cfg \
+  -c "reset_config srst_only srst_push_pull; init; reset halt; flash write_image erase /tmp/loader.elf; reset run; shutdown"'
+```
+
+openocd prints `Translation from khz to adapter speed not implemented` errors; they
+are harmless. After flashing, the matrix shows the boot animation until Linux drives
+GPIO70 high; `linux/run.sh` does that, on a normal boot `arduino-router` does it.
+
+Sketches keep working, but they must be compiled and uploaded with **this** core:
+uploading with the stock core (App Lab, or `arduino-cli` with the released
+`arduino:zephyr` platform) flashes its own loader and removes MicroPython. To use the
+core from the Arduino IDE / CLI, link it into your sketchbook as described in the
+ArduinoCore-zephyr README (`~/Arduino/hardware/arduino-git/zephyr`).
+
+## 3. Linux side (on the board)
+
+One-time setup (Debian trixie):
 
 ```sh
 sudo apt install -y socat python3-spidev python3-libgpiod   # libgpiod >= 2
@@ -29,6 +90,8 @@ sudo chmod 666 /dev/spidev0.0   # root-only by default, resets on reboot (or run
 
 The `arduino` user is already in the `gpiod` group, so `/dev/gpiochip*` needs no change.
 
+Copy `linux/` to the board and start the bridge:
+
 ```sh
 ./linux/run.sh
 ```
@@ -36,103 +99,29 @@ The `arduino` user is already in the `gpiod` group, so `/dev/gpiochip*` needs no
 Then, in another shell:
 
 ```sh
-screen /tmp/ttyUNOQ0           # or: echo hello > /tmp/ttyUNOQ0; cat /tmp/ttyUNOQ0
+screen /tmp/ttyUNOQ0
 ```
 
-Env overrides: `TTY_LINK`, `SPI_DEV`, `SPI_SPEED`, `GPIO_CHIP`, `GPIO_LINE`.
-
-Only one bridge can run at a time (it owns GPIO70); a second one fails with `EBUSY`.
-
-## MCU, option A: Arduino sketch
-
-On the board:
-
-```sh
-arduino-cli compile --upload --profile default sketch
 ```
-(or open `sketch/` in App Lab / Arduino IDE with board *Arduino UNO Q*).
-
-After flashing, the MCU shows the boot animation until Linux drives GPIO70 high
-(the same line is later used as the MCU "data ready" signal). Release it with:
-
-```sh
-timeout 5 gpioset -c gpiochip1 70=1
+MicroPython v1.30.0-preview... on 2026-10-23; zephyr-arduino_uno_q with stm32u585xx
+>>> from machine import ADC
+>>> ADC(("adc1", 9)).read_u16()
 ```
 
-The sketch only starts driving PG13 after the first SPI frame from the bridge, so
-the two sides never drive the line at the same time.
+The boot banner is buffered until the bridge connects; Ctrl-C, paste mode and raw
+REPL work as usual.
 
-## MCU, option B: MicroPython
+Env overrides for `run.sh`: `TTY_LINK`, `SPI_DEV`, `SPI_SPEED`, `GPIO_CHIP`,
+`GPIO_LINE`. Only one bridge can run at a time (it owns GPIO70); a second one fails
+with `EBUSY`.
 
-MicroPython's Zephyr port gets an SPI stdio driver (`CONFIG_MICROPY_GETCHAR_SPI`,
-`ports/zephyr/src/zephyr_spi_stdio.c`) that replaces the UART console; the
-`arduino_uno_q` board enables it on SPI3 with PG13 as ready line. Built on a host PC,
-flashed through adb.
+## Notes
 
-### 1. Zephyr workspace
-
-Uses the Arduino Zephyr fork (`zephyr-arduino-v4.4.99`) through the ArduinoCore-zephyr
-manifest. `bootstrap.sh` creates `venv/` with west, runs `west init -l` / `west update`
-and installs the Zephyr SDK:
-
-```sh
-mkdir zephyr-ws && cd zephyr-ws
-git clone -b arduino-next https://github.com/arduino/ArduinoCore-zephyr
-cd ArduinoCore-zephyr && ./extra/bootstrap.sh && cd ..
-```
-
-The workspace root is `zephyr-ws/` (Zephyr in `zephyr-ws/zephyr`). Always activate
-the venv and run `west` from inside the workspace:
-
-```sh
-source zephyr-ws/ArduinoCore-zephyr/venv/bin/activate
-```
-
-### 2. Zephyr SPI driver fix
-
-In peripheral mode the STM32 SPI driver queues a single FIFO packet, so the TxFIFO
-underruns above ~100 kHz. Apply the fix from this repo:
-
-```sh
-cd zephyr-ws/zephyr
-git switch -c spi_stm32_peripheral_prefill
-git am <this repo>/patches/zephyr/0001-drivers-spi-stm32-pre-fill-two-packets-in-peripheral.patch
-```
-
-### 3. MicroPython
-
-```sh
-git clone -b unoq_spi_shell https://github.com/facchinm/micropython
-cd micropython && git submodule update --init lib/micropython-lib   # for the frozen manifest
-```
-
-### 4. Build
-
-```sh
-cd zephyr-ws
-west build -p always -b arduino_uno_q -d build-mp-unoq <path to micropython>/ports/zephyr
-```
-
-### 5. Flash
-
-The board's openocd drives the MCU SWD lines through GPIOs. This overwrites the
-Arduino core:
-
-```sh
-adb push build-mp-unoq/zephyr/zephyr.elf /tmp/micropython.elf
-adb shell 'cd /opt/openocd && ./bin/openocd -s . -s share/openocd/scripts -f openocd_gpiod.cfg \
-  -c "reset_config srst_only srst_push_pull; init; reset halt; flash write_image erase /tmp/micropython.elf; reset run; shutdown"'
-```
-
-openocd prints `Translation from khz to adapter speed not implemented` errors; they
-are harmless.
-
-### 6. Use
-
-Start the bridge as in [Linux](#linux) and open `/tmp/ttyUNOQ0`: the boot banner is
-buffered until the bridge connects, then the `>>>` prompt is ready (Ctrl-C works).
-No GPIO70 boot release is needed, that is an Arduino core loader feature. Kernel
-messages (`printk`) still go to LPUART1 (`/dev/ttyHS1`).
-
-To go back to the Arduino core, upload the sketch again (option A), which also
-flashes the core image.
+- MicroPython runs at the sketch priority with time slicing, so a busy Python loop
+  slows the sketch down but doesn't stop it (and vice versa).
+- SPI3 and PG13 are taken by the REPL: sketches must not use SPI3.
+- Peripherals are looked up by devicetree node label (`"adc1"`, `"i2c4"`, ...) and
+  initialised on first use, like the Arduino core does.
+- `/flash` is not mounted automatically: MicroPython's default `_boot.py` would
+  format the `storage` partition shared with sketches.
+- Kernel messages (`printk`) go to the Zephyr console, not to the REPL.
