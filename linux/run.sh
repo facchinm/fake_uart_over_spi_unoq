@@ -3,6 +3,8 @@
 # Env passthrough: SPI_DEV, SPI_SPEED, GPIO_CHIP, GPIO_LINE
 set -eu
 
+gpioset -c1 -t0 70=1
+
 TTY_LINK=${TTY_LINK:-/tmp/ttyUNOQ0}
 DIR=$(cd "$(dirname "$0")" && pwd)
 
