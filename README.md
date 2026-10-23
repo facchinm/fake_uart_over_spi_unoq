@@ -71,7 +71,8 @@ adb shell 'cd /opt/openocd && ./bin/openocd -s . -s share/openocd/scripts -f ope
 
 openocd prints `Translation from khz to adapter speed not implemented` errors; they
 are harmless. After flashing, the matrix shows the boot animation until Linux drives
-GPIO70 high; `linux/run.sh` does that, on a normal boot `arduino-router` does it.
+GPIO70 high; the bridge does that when it starts (on a normal boot `arduino-router`
+does it too).
 
 Sketches keep working, but they must be compiled and uploaded with **this** core:
 uploading with the stock core (App Lab, or `arduino-cli` with the released
@@ -81,22 +82,50 @@ ArduinoCore-zephyr README (`~/Arduino/hardware/arduino-git/zephyr`).
 
 ## 3. Linux side (on the board)
 
-One-time setup (Debian trixie):
+Clone this repository on the board, then the one-time setup (Debian trixie):
 
 ```sh
-sudo apt install -y socat python3-spidev python3-libgpiod   # libgpiod >= 2
-sudo chmod 666 /dev/spidev0.0   # root-only by default, resets on reboot (or run.sh as root)
+sudo apt install -y socat python3-spidev python3-libgpiod inotify-tools   # libgpiod >= 2
+```
+
+### Start at boot (recommended)
+
+Install the systemd service, which:
+
+- starts the bridge once `arduino-router` has released the MCU from its boot
+  animation;
+- watches `/tmp/remoteocd`, where sketch/core uploads are staged: on activity it stops
+  the bridge, drives GPIO70 high, waits for openocd to finish flashing and starts the
+  bridge again, so the REPL comes back by itself after every upload.
+
+```sh
+sudo mkdir -p /opt/spi-uart-bridge
+sudo cp linux/run.sh linux/spi_uart_bridge.py linux/spi_uart_service.sh /opt/spi-uart-bridge/
+sudo cp linux/spi-uart-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spi-uart-bridge
+```
+
+The service runs as `arduino` and gives the `gpiod` group access to
+`/dev/spidev0.0` at start. Logs: `journalctl -u spi-uart-bridge -f`.
+
+### Manual start
+
+`/dev/spidev0.0` is root-only by default (reset at every boot):
+
+```sh
+sudo chmod 666 /dev/spidev0.0
 ```
 
 The `arduino` user is already in the `gpiod` group, so `/dev/gpiochip*` needs no change.
-
-Copy `linux/` to the board and start the bridge:
 
 ```sh
 ./linux/run.sh
 ```
 
-Then, in another shell:
+### Use
+
+Open the fake serial port:
 
 ```sh
 screen /tmp/ttyUNOQ0
@@ -109,7 +138,8 @@ MicroPython v1.30.0-preview... on 2026-10-23; zephyr-arduino_uno_q with stm32u58
 ```
 
 The boot banner is buffered until the bridge connects; Ctrl-C, paste mode and raw
-REPL work as usual.
+REPL work as usual. When it starts, the bridge keeps GPIO70 high until MicroPython
+answers over SPI, so a freshly flashed loader never stays stuck in the boot animation.
 
 Env overrides for `run.sh`: `TTY_LINK`, `SPI_DEV`, `SPI_SPEED`, `GPIO_CHIP`,
 `GPIO_LINE`. Only one bridge can run at a time (it owns GPIO70); a second one fails

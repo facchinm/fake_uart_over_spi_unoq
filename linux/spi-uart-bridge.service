@@ -1,0 +1,14 @@
+[Unit]
+Description=MicroPython REPL over SPI (fake UART at /tmp/ttyUNOQ0)
+# arduino-router releases the MCU from its boot animation
+After=arduino-router.service
+
+[Service]
+User=arduino
+ExecStartPre=+/bin/sh -c 'chgrp gpiod /dev/spidev0.0 && chmod 660 /dev/spidev0.0'
+ExecStart=/opt/spi-uart-bridge/spi_uart_service.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
