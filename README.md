@@ -60,25 +60,31 @@ The result is `firmwares/zephyr-arduino_uno_q_stm32u585xx.elf`.
 
 ## 2. Flash the loader
 
-The board's openocd drives the MCU SWD lines through GPIOs. From the PC, with the
-board connected over USB (or use `scp` / `ssh` instead of adb):
+There is no separate flashing step: uploading a sketch with this core also flashes
+its loader (`firmwares/zephyr-arduino_uno_q_stm32u585xx.elf`, built above). Make the
+core available to `arduino-cli` / the Arduino IDE by linking it into your sketchbook,
+as described in the ArduinoCore-zephyr README:
 
 ```sh
-adb push firmwares/zephyr-arduino_uno_q_stm32u585xx.elf /tmp/loader.elf
-adb shell 'cd /opt/openocd && ./bin/openocd -s . -s share/openocd/scripts -f openocd_gpiod.cfg \
-  -c "reset_config srst_only srst_push_pull; init; reset halt; flash write_image erase /tmp/loader.elf; reset run; shutdown"'
+mkdir -p ~/Arduino/hardware/arduino-git
+ln -s "$PWD" ~/Arduino/hardware/arduino-git/zephyr
 ```
 
-openocd prints `Translation from khz to adapter speed not implemented` errors; they
-are harmless. After flashing, the matrix shows the boot animation until Linux drives
-GPIO70 high; the bridge does that when it starts (on a normal boot `arduino-router`
-does it too).
+Then compile and upload any sketch for the `arduino-git:zephyr:unoq` board (the
+UNO Q core also needs the `Arduino_RouterBridge` library):
 
-Sketches keep working, but they must be compiled and uploaded with **this** core:
-uploading with the stock core (App Lab, or `arduino-cli` with the released
-`arduino:zephyr` platform) flashes its own loader and removes MicroPython. To use the
-core from the Arduino IDE / CLI, link it into your sketchbook as described in the
-ArduinoCore-zephyr README (`~/Arduino/hardware/arduino-git/zephyr`).
+```sh
+arduino-cli lib install Arduino_RouterBridge
+arduino-cli compile --upload -b arduino-git:zephyr:unoq -p <port> <sketch>
+```
+
+Keep using this core for later uploads: uploading with the stock core (App Lab, or
+the released `arduino:zephyr` platform) flashes its own loader and removes
+MicroPython.
+
+After an upload the matrix shows the boot animation until Linux drives GPIO70 high;
+the bridge service below takes care of that (on a normal boot `arduino-router` does
+it too).
 
 ## 3. Linux side (on the board)
 
