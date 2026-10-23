@@ -62,17 +62,35 @@ class Bridge:
         self.last = time.monotonic()
 
         if rx[0] != MAGIC or rx[1] != TYPE_DATA:
-            return
+            return False
         length = rx[2] | (rx[3] << 8)
-        if 0 < length <= MAX_PAYLOAD:
+        if length > MAX_PAYLOAD:
+            return False
+        if length:
             data = rx[HDR_SIZE:HDR_SIZE + length]
             log(f"MCU   -> {data!r}")
             os.write(self.out_fd, data)
+        return True
 
     def send(self, data):
         log(f"Linux -> {data!r}")
         for i in range(0, len(data), MAX_PAYLOAD):
             self.transfer(TYPE_DATA, data[i:i + MAX_PAYLOAD])
+
+
+def wait_for_mcu(req, line, bridge):
+    """Keep the ready line high until the MCU answers, so the loader leaves its boot animation."""
+    released = {line: gpiod.LineSettings(direction=Direction.INPUT)}
+    high = {line: gpiod.LineSettings(direction=Direction.OUTPUT, output_value=Value.ACTIVE)}
+    logged = False
+    # Probe with the line released: once it answers, the MCU drives the line itself
+    while not bridge.transfer(TYPE_POLL):
+        if not logged:
+            log("waiting for the MCU, holding the ready line high")
+            logged = True
+        req.reconfigure_lines(high)
+        time.sleep(0.2)
+        req.reconfigure_lines(released)
 
 
 def main():
@@ -94,11 +112,13 @@ def main():
     req = gpiod.request_lines(
         chip,
         consumer="spi-uart-bridge",
-        config={args.gpio_line: gpiod.LineSettings(direction=Direction.INPUT, edge_detection=Edge.RISING)},
+        config={args.gpio_line: gpiod.LineSettings(direction=Direction.INPUT)},
     )
+    bridge = Bridge(spi, sys.stdout.fileno())
+    wait_for_mcu(req, args.gpio_line, bridge)
+    req.reconfigure_lines({args.gpio_line: gpiod.LineSettings(direction=Direction.INPUT, edge_detection=Edge.RISING)})
     log(f"bridge up: {args.spi_dev} @ {args.spi_speed} Hz, ready line {chip}:{args.gpio_line}")
 
-    bridge = Bridge(spi, sys.stdout.fileno())
     in_fd = sys.stdin.fileno()
 
     def drain_mcu():
