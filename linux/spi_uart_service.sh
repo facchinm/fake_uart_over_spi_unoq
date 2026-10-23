@@ -27,9 +27,13 @@ stop_bridge() {
 
 wait_for_flash() {
     # The files are staged first, then openocd runs
-    for _ in $(seq 100); do
-        pgrep -f "$OPENOCD" >/dev/null && break
-        sleep 0.1
+    for _ in $(seq 500); do
+        if pgrep -f "$OPENOCD" >/dev/null; then
+            # As soon as openocd runs, so the loader never plays the boot animation
+            gpioset -c "$READY_CHIP" -t0 "$READY_LINE=1"
+            break
+        fi
+        sleep 0.02
     done
     while pgrep -f "$OPENOCD" >/dev/null; do
         sleep 0.2
@@ -53,8 +57,6 @@ start_bridge
 while read -r -u 3 _; do
     log "upload detected"
     stop_bridge
-    # Keeps the freshly flashed loader from waiting in its boot animation
-    gpioset -c "$READY_CHIP" -t0 "$READY_LINE=1"
     wait_for_flash
     while read -r -u 3 -t 1 _; do :; done
     log "flash done"
